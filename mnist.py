@@ -31,7 +31,7 @@ import wandb
 ############################ CONFIG ########################
 
 from dotenv import dotenv_values
-config = dotenv_values(".env")
+config = { **dotenv_values(".env"), **os.environ }
 
 LOG_NAME = config.get("LOG_NAME", "MNIST")
 TIMEZONE = config.get("TIMEZONE", "UTC")
