@@ -54,7 +54,7 @@ ONLY_USE_DATA_SUBSET = config.get("ONLY_USE_DATA_SUBSET", "0").lower() in ("true
 SEED = config.get("SEED", random.randint(0, 1024*1024))
 LOG_NAME = f"{LOG_TAG}_{SEED}"
 GATE_ARCHITECTURE = ast.literal_eval(config.get("GATE_ARCHITECTURE", "[1300,1300,1300]"))
-INTERCONNECT_ARCHITECTURE = ast.literal_eval(config.get("INTERCONNECT_ARCHITECTURE", "[[32, 325], [26, 52], [26, 52]]"))
+INTERCONNECT_ARCHITECTURE = ast.literal_eval(config.get("INTERCONNECT_ARCHITECTURE", "[8, 4]"))
 assert len(GATE_ARCHITECTURE) == len(INTERCONNECT_ARCHITECTURE)
 BATCH_SIZE = int(config.get("BATCH_SIZE", 256))
 
@@ -141,23 +141,25 @@ WANDB_KEY and wandb.log({"device": str(device)})
 ############################ MODEL ########################
 
 class LearnableInterconnect(nn.Module):
-    def __init__(self, layer_inputs, layer_outputs, block_inputs, block_outputs, name=''):
+    def __init__(self, layer_inputs, layer_outputs, number_of_blocks, name=''):
         super(LearnableInterconnect, self).__init__()
         self.layer_inputs = layer_inputs
         self.layer_outputs = layer_outputs
-        self.block_inputs = block_inputs
-        self.block_outputs = block_outputs
+        self.number_of_blocks = number_of_blocks
         self.name = name
         self.binarized = False
-        
-        self.n_blocks = layer_inputs // block_inputs
-        assert self.n_blocks == layer_outputs // block_outputs, f"name={self.name}, n_blocks={self.n_blocks}, block_inputs={self.block_inputs}"
-        
-        self.c = nn.Parameter(torch.zeros((self.n_blocks, block_inputs, block_outputs), dtype=torch.float32))
+
+        assert layer_inputs % number_of_blocks == 0
+        assert layer_outputs % number_of_blocks == 0
+        self.block_inputs = layer_inputs // number_of_blocks 
+        self.block_outputs = layer_outputs // number_of_blocks
+        log(f"Interconnect {self.name}: {self.number_of_blocks}x {self.block_inputs}->{self.block_outputs}")
+                
+        self.c = nn.Parameter(torch.zeros((self.number_of_blocks, self.block_inputs, self.block_outputs), dtype=torch.float32))
         nn.init.normal_(self.c, mean=0.0, std=1)
     
     def forward(self, x):
-        x_reshaped = x.view(-1, self.n_blocks, self.block_inputs)
+        x_reshaped = x.view(-1, self.number_of_blocks, self.block_inputs)
         connections = F.softmax(self.c, dim=1) if not self.binarized else self.c
         output = torch.einsum('bnm,nmo->bno', x_reshaped, connections)
         return output.reshape(x.shape[0], self.layer_outputs)
@@ -258,10 +260,10 @@ class Model(nn.Module):
         layers_ = []
         for layer_idx, (layer_gates, layer_interconnect) in enumerate(zip(gate_architecture,interconnect_architecture)):
             if layer_idx==0:
-                layers_.append(LearnableInterconnect(input_size, layer_gates*2, layer_interconnect[0], layer_interconnect[1], f"i_{layer_idx}"))
+                layers_.append(LearnableInterconnect(input_size, layer_gates*2, layer_interconnect, f"i_{layer_idx}"))
                 layers_.append(LearnableGate16Array(layer_gates, f"g_{layer_idx}"))
             else:
-                layers_.append(LearnableInterconnect(prev_gates, layer_gates*2, layer_interconnect[0], layer_interconnect[1], f"i_{layer_idx}"))
+                layers_.append(LearnableInterconnect(prev_gates, layer_gates*2, layer_interconnect, f"i_{layer_idx}"))
                 layers_.append(LearnableGate16Array(layer_gates, f"g_{layer_idx}"))
             prev_gates = layer_gates
         self.layers = nn.ModuleList(layers_)
