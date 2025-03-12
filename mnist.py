@@ -53,7 +53,7 @@ ONLY_USE_DATA_SUBSET = config.get("ONLY_USE_DATA_SUBSET", "0").lower() in ("true
 
 SEED = config.get("SEED", random.randint(0, 1024*1024))
 LOG_NAME = f"{LOG_TAG}_{SEED}"
-GATE_ARCHITECTURE = ast.literal_eval(config.get("GATE_ARCHITECTURE", "[1300,1300,1300]"))
+GATE_ARCHITECTURE = ast.literal_eval(config.get("GATE_ARCHITECTURE", "[300,300]"))
 INTERCONNECT_ARCHITECTURE = ast.literal_eval(config.get("INTERCONNECT_ARCHITECTURE", "[8, 4]"))
 assert len(GATE_ARCHITECTURE) == len(INTERCONNECT_ARCHITECTURE)
 BATCH_SIZE = int(config.get("BATCH_SIZE", 256))
