@@ -1,3 +1,5 @@
+# make a copy of the model at iteration LOTTERY_CLONE_ITERATION
+
 # /// script
 # dependencies = [
 #   "python-dotenv",
@@ -12,7 +14,7 @@
 # [tool.uv]
 # exclude-newer = "2024-02-20T00:00:00Z"
 # ///
-# pip install wandb python-dotenv python-telegram-bot asyncio
+# pip install wandb python-dotenv python-telegram-bot asyncio && apt install -y gcc
 
 import random
 import torch
@@ -29,6 +31,7 @@ import socket
 from zoneinfo import ZoneInfo
 import wandb
 import ast
+import math
 
 import torch.profiler
 ############################ CONFIG ########################
@@ -61,7 +64,7 @@ assert len(GATE_ARCHITECTURE) == len(INTERCONNECT_ARCHITECTURE)
 BATCH_SIZE = int(config.get("BATCH_SIZE", 256))
 
 EPOCHS = int(config.get("EPOCHS", 50))
-EPOCH_STEPS = round(54_000 / BATCH_SIZE) # 54K train /6K val/10K test
+EPOCH_STEPS = round(54_000 / BATCH_SIZE) # 54K train /6K val/10K test = 211
 TRAINING_STEPS = EPOCHS*EPOCH_STEPS
 PRINTOUT_EVERY = int(config.get("PRINTOUT_EVERY", EPOCH_STEPS // 4))
 VALIDATE_EVERY = int(config.get("VALIDATE_EVERY", EPOCH_STEPS))
@@ -83,6 +86,8 @@ FORCE_CPU = config.get("FORCE_CPU", "0").lower() in ("true", "1", "yes")
 COMPILE_MODEL = config.get("COMPILE_MODEL", "0").lower() in ("true", "1", "yes")
 
 OPT_GATE16_CODEPATH = int(config.get("OPT_GATE16_CODEPATH", 2))
+LOTTERY_ITERATION = int(config.get("LOTTERY_ITERATION", -1))
+LOTTERY_CLONE_ITERATION = int(config.get("LOTTERY_CLONE_ITERATION", -1))
 
 config_printout_keys = ["LOG_NAME", "TIMEZONE", "WANDB_PROJECT",
                "BINARIZE_IMAGE_TRESHOLD", "IMG_WIDTH", "INPUT_SIZE", "DATA_SPLIT_SEED", "TRAIN_FRACTION", "NUMBER_OF_CATEGORIES", "ONLY_USE_DATA_SUBSET",
@@ -90,7 +95,7 @@ config_printout_keys = ["LOG_NAME", "TIMEZONE", "WANDB_PROJECT",
                "EPOCHS", "EPOCH_STEPS", "TRAINING_STEPS", "PRINTOUT_EVERY", "VALIDATE_EVERY",
                "LEARNING_RATE",
                "SUPPRESS_PASSTHROUGH", "SUPPRESS_CONST", "TENSION_REGULARIZATION",
-               "PROFILE", "FORCE_CPU", "COMPILE_MODEL"]
+               "PROFILE", "FORCE_CPU", "COMPILE_MODEL", "LOTTERY_ITERATION", "LOTTERY_CLONE_ITERATION"]
 config_printout_dict = {key: globals()[key] for key in config_printout_keys}
 
 # Making sure sensitive configs are not logged
@@ -483,6 +488,11 @@ class Model(nn.Module):
                 layer.binarize(bin_value)
         return model_binarized
 
+    def clone(self, device):
+        model_cloned = Model(self.seed, self.gate_architecture, self.interconnect_architecture, self.number_of_categories, self.input_size).to(device)
+        model_cloned.load_state_dict(self.state_dict())
+        return model_cloned
+
     def get_passthrough_fraction(self):
         pass_fraction_array = []
         indices = torch.tensor([3, 5, 10, 12], dtype=torch.long)
@@ -658,8 +668,43 @@ log(f"EPOCH_STEPS={EPOCH_STEPS}, will train for {EPOCHS} EPOCHS")
 optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=0) # if weight decay encourages uniform distribution
 time_start = time.time()
 
+lottery_iteration_number = 1
 if PROFILE: prof.start()
 for i in range(TRAINING_STEPS):
+    # if i == LOTTERY_CLONE_ITERATION:
+    #     model_clone_for_lottery = model.clone(device)
+    #     log("--> model_clone_for_lottery READY <--")
+    if (i>LOTTERY_CLONE_ITERATION) and (i%LOTTERY_ITERATION==0):
+        LOTTERY_RESET_FRACTION = math.pow(20,1/float(lottery_iteration_number)) / 100. # 20% to start with
+        log(f"lottery_iteration_number={lottery_iteration_number}, LOTTERY_RESET_FRACTION={LOTTERY_RESET_FRACTION:.2f}")
+        
+        indices_to_reset = []
+        for model_layer in model.layers:
+            if hasattr(model_layer, 'c'):
+                lottery_reset_number = max(int(model_layer.c.shape[1] * LOTTERY_RESET_FRACTION),1)
+                log(f"lottery_reset_number={lottery_reset_number}")
+                weights_after_softmax = F.softmax(model_layer.c, dim=0)
+                t, p = torch.topk(weights_after_softmax, k=1, dim=0)
+                smallest_values, smallest_indices = torch.topk(t.squeeze(0), k=lottery_reset_number, largest=False)
+                # log(f"lottery_reset_number={lottery_reset_number}, smallest_indices={smallest_indices}")
+                indices_to_reset.append(smallest_indices)
+                
+        # log(f"indices_to_reset={indices_to_reset}")
+        # model = model_clone_for_lottery.clone(device)
+        
+        layer_ix = 0
+        for restored_model_layer in model.layers:
+            if hasattr(model_layer, 'c'):
+                # restored_model_layer.c.data[:, smallest_indices] = 0
+                nn.init.normal_(restored_model_layer.c.data[:, indices_to_reset[layer_ix]], mean=0.0, std=1)
+                layer_ix = layer_ix + 1
+        
+        optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=0)
+        # import IPython
+        # IPython.embed()
+        # this_will_quit()
+        lottery_iteration_number = lottery_iteration_number + 1
+
     indices = torch.randint(0, train_dataset_samples, (BATCH_SIZE,), device=device)
     x = train_images[indices]
     y = train_labels[indices]
@@ -754,6 +799,7 @@ for i in range(TRAINING_STEPS):
         top2c /= len(model.layers)
         top4c /= len(model.layers)
         top8c /= len(model.layers)
+        log(f"top1c={top1c*100:.2f}%")
 
         WANDB_KEY and wandb.log({"epoch": current_epoch, 
             "train_loss": train_loss, "train_acc": train_acc*100,
@@ -792,6 +838,11 @@ model_binarized = get_binarized_model(model)
 bin_test_loss, bin_test_acc = validate(dataset="test", model=model_binarized)
 log(f"BIN TEST loss={bin_test_loss:.3f} acc={bin_test_acc*100:.2f}%")
 
+train_loss, train_acc = validate('train')
+_, bin_train_acc = validate(dataset="train", model=model_binarized)
+train_acc_diff = train_acc-bin_train_acc
+log(f"{LOG_NAME} BIN TRN acc={bin_train_acc*100:.2f}%, train_acc_diff={train_acc_diff*100:.2f}%")
+
 model_filename = (
     f"{datetime.now(ZoneInfo(TIMEZONE)).strftime('%Y%m%d-%H%M%S')}"
     f"_binTestAcc{round(bin_test_acc * 10000)}"
@@ -812,7 +863,8 @@ WANDB_KEY and wandb.log({
 
 from telegram import Bot
 import asyncio
-(TG_TOKEN and TG_CHATID) and asyncio.run(Bot(token=TG_TOKEN).send_message(chat_id=int(TG_CHATID), text=LOG_NAME))
+(TG_TOKEN and TG_CHATID) and asyncio.run(Bot(token=TG_TOKEN).send_message(chat_id=int(TG_CHATID), 
+    text=f"{LOG_NAME} {train_acc*100:.1f}%|{bin_train_acc*100:.1f}%|{train_acc_diff*100:.2f}%"))
 
 WANDB_KEY and wandb.finish()
 
