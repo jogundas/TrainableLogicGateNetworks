@@ -174,7 +174,7 @@ class SparseInterconnect(nn.Module):
     @torch.profiler.record_function("mnist::Sparse::FWD")
     def forward(self, x):
         batch_size = x.shape[0]
-        connections = F.softmax(self.c, dim=0) if not self.binarized else self.c
+        connections = F.softmax(self.c * 4., dim=0) if not self.binarized else self.c
         return torch.matmul(x, connections)
 
     def binarize(self, bin_value=1):
@@ -675,7 +675,10 @@ for i in range(TRAINING_STEPS):
     #     model_clone_for_lottery = model.clone(device)
     #     log("--> model_clone_for_lottery READY <--")
     if (i>LOTTERY_CLONE_ITERATION) and (i%LOTTERY_ITERATION==0):
-        LOTTERY_RESET_FRACTION = math.pow(20,1/float(lottery_iteration_number)) / 100. # 20% to start with
+        if lottery_iteration_number>1:
+            LOTTERY_RESET_FRACTION = math.pow(20, 1/(float(lottery_iteration_number)/2.)) / 100. # 20% to start with
+        else:
+            LOTTERY_RESET_FRACTION = 0.2
         log(f"lottery_iteration_number={lottery_iteration_number}, LOTTERY_RESET_FRACTION={LOTTERY_RESET_FRACTION:.2f}")
         
         indices_to_reset = []
@@ -864,7 +867,7 @@ WANDB_KEY and wandb.log({
 from telegram import Bot
 import asyncio
 (TG_TOKEN and TG_CHATID) and asyncio.run(Bot(token=TG_TOKEN).send_message(chat_id=int(TG_CHATID), 
-    text=f"{LOG_NAME} {train_acc*100:.1f}%|{bin_train_acc*100:.1f}%|{train_acc_diff*100:.2f}%"))
+    text=f"{LOG_NAME} {train_acc*100:.1f}%|{bin_train_acc*100:.1f}%|{train_acc_diff*100:.2f}%|tstbin={bin_test_acc*100:.1f}%"))
 
 WANDB_KEY and wandb.finish()
 
